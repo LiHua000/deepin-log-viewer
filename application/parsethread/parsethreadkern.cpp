@@ -92,10 +92,25 @@ void ParseThreadKern::handleKern()
             return;
         }
 
-        //如果是压缩文件，对其解压缩
+        //如果是压缩文件，对其解压缩（按需解压，只解压需要的部分）
         QString filePath = m_FilePath.at(i);
+        
+        // 获取当前文件的行数
+        qint64 lineCount = DLDBusHandler::instance(this)->getLineCount(filePath);
+        
+        // 如果全局起始行大于当前文件行数，跳过此文件
+        if (gStartLine >= lineCount) {
+            gStartLine -= lineCount;
+            continue;
+        }
+        
         if(QString::compare(QFileInfo(filePath).suffix(), "gz", Qt::CaseInsensitive) == 0){
-            QStringList filePathList = DLDBusHandler::instance(this)->getFileInfo(filePath);
+            // 计算在当前文件中的实际起始行和需要读取的行数
+            qint64 fileStartLine = gStartLine;
+            qint64 fileLineCount = qMin<int>(SEGEMENT_SIZE, lineCount - gStartLine);
+            
+            // 使用按需解压，只解压需要的部分
+            QStringList filePathList = DLDBusHandler::instance(this)->getFileInfoPartial(filePath, true, fileStartLine, fileLineCount);
             if(filePathList.size()){
                 filePath = filePathList.at(0);
             }else {
@@ -103,7 +118,7 @@ void ParseThreadKern::handleKern()
             }
         }
 
-        qint64 lineCount = DLDBusHandler::instance(this)->getLineCount(filePath);
+        lineCount = DLDBusHandler::instance(this)->getLineCount(filePath);
 
         // 获取全局起始行在当前文件的相对起始行位置
         if (gStartLine >= lineCount) {
@@ -111,9 +126,10 @@ void ParseThreadKern::handleKern()
             continue;
         }
 
-        qint64 startLine = gStartLine;
+        qint64 startLine = gStartLine; qint64 readLineCount =
+        qMin<int>(SEGEMENT_SIZE, lineCount - gStartLine);
 
-        QStringList strList = DLDBusHandler::instance(this)->readLogLinesInRange(filePath, startLine, SEGEMENT_SIZE);
+        QStringList strList = DLDBusHandler::instance(this)->readLogLinesInRange(filePath, startLine, readLineCount);
         for (int j = strList.size() - 1; j >= 0; --j) {
             if (!m_canRun) {
                 return;

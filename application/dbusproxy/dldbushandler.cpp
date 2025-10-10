@@ -144,6 +144,18 @@ QStringList DLDBusHandler::getFileInfo(const QString &flag, bool unzip)
     return filePath;
 }
 
+QStringList DLDBusHandler::getFileInfoPartial(const QString &flag, bool unzip, qint64 startLine, qint64 lineCount)
+{
+    QDBusPendingReply<QStringList> reply = m_dbus->getFileInfoPartial(flag, unzip, startLine, lineCount);
+    reply.waitForFinished();
+    if (reply.isError()) {
+        qCWarning(logDBusHandler) << "call dbus iterface 'getFileInfoPartial()' failed. error info:" << reply.error().message();
+    } else {
+        filePath = reply.value();
+    }
+    return filePath;
+}
+
 QStringList DLDBusHandler::getOtherFileInfo(const QString &flag, bool unzip)
 {
     QDBusPendingReply<QStringList> reply = m_dbus->getOtherFileInfo(flag, unzip);

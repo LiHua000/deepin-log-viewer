@@ -17,6 +17,7 @@ public:
     QString readLog(const QString &filePath);
     QStringList readLogLinesInRange(const QString &filePath, qint64 startLine = 0, qint64 lineCount = 500, bool bReverse = true);
     QStringList getFileInfo(const QString &flag, bool unzip = true);
+    QStringList getFileInfoPartial(const QString &flag, bool unzip, qint64 startLine, qint64 lineCount);
     QStringList getOtherFileInfo(const QString &flag, bool unzip = true);
     int exitCode();
     void quit();

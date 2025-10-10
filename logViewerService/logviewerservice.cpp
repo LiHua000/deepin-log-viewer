@@ -88,6 +88,48 @@ QString unzipToTempFile(const QString &sourceFile, const QString &tempFileTempla
     return tmpFile.fileName();
 }
 
+/**
+ * @brief 部分解压gzip文件，只解压指定行范围的内容
+ * @param sourceFile 源压缩文件路径
+ * @param tempFileTemplate 临时文件模板
+ * @param startLine 起始行号（从0开始）
+ * @param lineCount 要解压的行数
+ * @return 解压后的临时文件路径，失败返回空字符串
+ */
+QString unzipPartialToTempFile(const QString &sourceFile, const QString &tempFileTemplate, qint64 startLine, qint64 lineCount)
+{
+    QProcess m_process;
+    
+    // 创建临时文件
+    QTemporaryFile tmpFile;
+    tmpFile.setAutoRemove(false);
+    tmpFile.setFileTemplate(tempFileTemplate);
+    if (!tmpFile.open()) {
+        qCWarning(logService) << QString("Create temporary file [%1](FileTemplate:%2) failed: %3")
+                                 .arg(tmpFile.fileName()).arg(tempFileTemplate).arg(tmpFile.errorString());
+        return QString();
+    }
+    
+    // 使用zcat + sed只解压指定行范围
+    QString command = "sh";
+    QStringList args;
+    args << "-c";
+    // zcat解压后通过sed提取指定行范围
+    QString cmdStr = QString("zcat \"%1\" | sed -n '%2,%3p'").arg(sourceFile).arg(startLine + 1).arg(startLine + lineCount);
+    args << cmdStr;
+    
+    m_process.setStandardOutputFile(tmpFile.fileName());
+    m_process.start(command, args);
+    m_process.waitForFinished(-1);
+    
+    if (m_process.exitCode() != 0) {
+        qCWarning(logService) << QString("Partial unzip failed for file %1, error: %2").arg(sourceFile).arg(m_process.errorString());
+        return QString();
+    }
+    
+    return tmpFile.fileName();
+}
+
 LogViewerService::LogViewerService(QObject *parent)
     : QObject(parent)
 {
@@ -817,6 +859,109 @@ QStringList LogViewerService::getFileInfo(const QString &file, bool unzip)
     for (int i = 0; i < fileList.count(); i++) {
         if (QString::compare(fileList[i].suffix(), "gz", Qt::CaseInsensitive) == 0 && unzip) {
             QString unzipFile = unzipToTempFile(fileList[i].absoluteFilePath(), tempFileTemplate);
+            if (!unzipFile.isEmpty()) {
+                fileNamePath.append(unzipFile);
+            }
+        }
+        else {
+            fileNamePath.append(fileList[i].absoluteFilePath());
+        }
+    }
+    return fileNamePath;
+}
+
+QStringList LogViewerService::getFileInfoPartial(const QString &file, bool unzip, qint64 startLine, qint64 lineCount)
+{
+    // 判断非法调用
+    if(!isValidInvoker()) {
+        return {};
+    }
+
+    if (tmpDir.isValid()) {
+        m_tmpDirPath = tmpDir.path();
+        // 每次解压前移除旧有的文件
+        if (unzip) {
+            removeDirFiles(m_tmpDirPath);
+        }
+    }
+
+    QStringList fileNamePath;
+    QString nameFilter;
+    QDir dir;
+    if (file.contains("deepin", Qt::CaseInsensitive) || file.contains("uos", Qt::CaseInsensitive)) {
+        QFileInfo appFileInfo(file);
+        QString appDir;
+        if (appFileInfo.isFile()) {
+            appDir = appFileInfo.absolutePath();
+        } else if (appFileInfo.isDir()) {
+            appDir = appFileInfo.absoluteFilePath();
+        } else {
+            return QStringList();
+        }
+
+        nameFilter = appDir.mid(appDir.lastIndexOf("/") + 1, appDir.size() - 1);
+        dir.setPath(appDir);
+        dir.setFilter(QDir::Files | QDir::NoSymLinks); //实现对文件的过滤
+        dir.setNameFilters(QStringList() << nameFilter + ".*"); //设置过滤
+        dir.setSorting(QDir::Time);
+
+        // 若该路径下未找到日志，则按日志文件名称来检索相关日志文件
+        QFileInfoList fileList = dir.entryInfoList();
+        if (fileList.size() == 0)
+            nameFilter = appFileInfo.completeBaseName();
+    } else if (file == "audit"){
+        dir.setPath("/var/log/audit");
+        nameFilter = file;
+    } else if (file == "coredump") {
+        QByteArray outByte = processCmdWithArgs("coredumpctl", QStringList() << "list");
+        QStringList strList = QString(outByte.replace('\u0000', "").replace("\x01", "")).split('\n', QString::SkipEmptyParts);
+
+        QRegExp re("(Storage: )\\S+");
+        for (int i = strList.size() - 1; i >= 0; --i) {
+            QString str = strList.at(i);
+            if (str.trimmed().isEmpty())
+                continue;
+
+            QStringList tmpList = str.split(" ", QString::SkipEmptyParts);
+            if (tmpList.count() < 10)
+                continue;
+
+            QString coreFile = tmpList[8];
+            QString pid = tmpList[4];
+            QString storagePath = "";
+            // 解析coredump文件保存位置
+            if (coreFile != "missing") {
+                QByteArray outInfoByte = processCmdWithArgs("coredumpctl", QStringList() << "info" << pid);
+                re.indexIn(outInfoByte);
+                storagePath = re.cap(0).replace("Storage: ", "");
+            }
+
+            if (!storagePath.isEmpty()) {
+                fileNamePath.append(storagePath);
+            }
+        }
+
+        return fileNamePath;
+    } else {
+        dir.setPath("/var/log");
+        nameFilter = file;
+    }
+    //要判断路径是否存在
+    if (!dir.exists()) {
+        qCWarning(logService) << "it is not true path";
+        return QStringList() << "";
+    }
+
+    dir.setFilter(QDir::Files | QDir::NoSymLinks); //实现对文件的过滤
+    dir.setNameFilters(QStringList() << nameFilter + ".*"); //设置过滤
+    dir.setSorting(QDir::Time);
+    QFileInfoList fileList = dir.entryInfoList();
+    QString tempFileTemplate = m_tmpDirPath + QDir::separator() + "Log_extract_XXXXXX.txt";
+
+    for (int i = 0; i < fileList.count(); i++) {
+        if (QString::compare(fileList[i].suffix(), "gz", Qt::CaseInsensitive) == 0 && unzip) {
+            // 使用部分解压功能
+            QString unzipFile = unzipPartialToTempFile(fileList[i].absoluteFilePath(), tempFileTemplate, startLine, lineCount);
             if (!unzipFile.isEmpty()) {
                 fileNamePath.append(unzipFile);
             }
